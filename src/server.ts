@@ -11,14 +11,55 @@ function text(...parts: string[]): CallToolResult {
   return { content: parts.map((part) => ({ type: "text" as const, text: part })) };
 }
 
-function failure(error: unknown): CallToolResult {
-  const message =
+function failure(error: unknown, extra?: string): CallToolResult {
+  const base =
     error instanceof BackendError
       ? error.hint
         ? `${error.message}\n${error.hint}`
         : error.message
       : `Unexpected failure: ${(error as Error).message}`;
+  const message = extra ? `${base}\n\n${extra}` : base;
   return { isError: true, content: [{ type: "text", text: message }] };
+}
+
+/**
+ * Builds the "here is what IS available" half of a miss.
+ *
+ * A model that saw an older, shorter coverage list earlier in a conversation
+ * will otherwise repeat it from memory. Putting the current list inside the
+ * error makes the correction unavoidable rather than optional.
+ */
+async function coverageHint(client: AnalysisClient, symbol: string): Promise<string> {
+  try {
+    const snapshots = await client.listSnapshots();
+    if (snapshots.length === 0) return "";
+
+    const wanted = symbol.trim().toUpperCase().replace(/^\$/, "");
+    const timeframesFor = new Map<string, string[]>();
+    for (const s of snapshots) {
+      timeframesFor.set(s.symbol, [...(timeframesFor.get(s.symbol) ?? []), s.timeframe]);
+    }
+
+    // The symbol may be covered on a different timeframe than the one asked for.
+    const sameSymbol = timeframesFor.get(wanted);
+    if (sameSymbol) {
+      return (
+        `${wanted} IS covered, but on ${sameSymbol.join(", ")} rather than the ` +
+        `timeframe requested. Retry with one of those.`
+      );
+    }
+
+    return (
+      `Currently covered (${timeframesFor.size} symbols, re-read this rather ` +
+      `than relying on an earlier list): ` +
+      [...timeframesFor.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([sym, tfs]) => `${sym} [${tfs.sort().join(",")}]`)
+        .join("; ")
+    );
+  } catch {
+    return "";
+  }
 }
 
 export function createServer(config: Config, client = new AnalysisClient(config)): McpServer {
@@ -34,7 +75,11 @@ export function createServer(config: Config, client = new AnalysisClient(config)
         "server cannot place, modify or cancel an order. Report what the " +
         "indicators say; never present it as a price forecast or as investment " +
         "advice, and always mention when the market is closed or the snapshot " +
-        "is stale.",
+        "is stale.\n\n" +
+        "Coverage changes as symbols are added to the runner. Never tell a " +
+        "user a symbol is unavailable based on an earlier reply in this " +
+        "conversation — call list_covered_symbols again first, because the " +
+        "list may have grown since you last looked.",
     },
   );
 
@@ -66,7 +111,7 @@ export function createServer(config: Config, client = new AnalysisClient(config)
         const snapshot = await client.getSnapshot(symbol, timeframe);
         return text(summarize(snapshot), json(snapshot));
       } catch (error) {
-        return failure(error);
+        return failure(error, await coverageHint(client, symbol));
       }
     },
   );
