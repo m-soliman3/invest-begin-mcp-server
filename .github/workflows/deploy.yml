@@ -1,0 +1,116 @@
+name: Deploy MCP Server
+
+# A pull request gets a no-traffic preview revision on Cloud Run; merging to
+# main promotes to 100%. Production traffic never moves until a PR is merged.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROJECT_ID: autotrader-b8851
+  REGION: europe-west1
+  SERVICE: ta-mcp-server
+
+permissions:
+  contents: read
+  id-token: write        # required for Workload Identity Federation
+  pull-requests: write   # to comment the preview URL on the PR
+
+jobs:
+  build:
+    name: Typecheck and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  deploy:
+    name: Deploy to Cloud Run
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      # ── Pull request: preview revision, no production traffic ──────────────
+      - name: Deploy preview revision
+        if: github.event_name == 'pull_request'
+        id: preview
+        run: |
+          TAG="pr-${{ github.event.number }}"
+          gcloud run deploy "$SERVICE" \
+            --source . \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --no-traffic --tag "$TAG" \
+            --quiet
+          URL=$(gcloud run services describe "$SERVICE" \
+            --project "$PROJECT_ID" --region "$REGION" \
+            --format="value(status.traffic.filter(\"tag:$TAG\").extract(\"url\"))" | tr -d '[]')
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test the preview
+        if: github.event_name == 'pull_request'
+        run: node scripts/smoke.mjs "${{ steps.preview.outputs.url }}/mcp"
+
+      - name: Comment preview URL on the PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const url = '${{ steps.preview.outputs.url }}';
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: [
+                '### MCP preview deployed',
+                '',
+                `Endpoint: \`${url}/mcp\``,
+                '',
+                'Serving **0%** of production traffic. Merging this PR promotes it to 100%',
+                'at `https://www.invest-begin.com/mcp`.',
+              ].join('\n'),
+            });
+
+      # ── main: promote to all traffic ───────────────────────────────────────
+      - name: Deploy to production
+        if: github.event_name == 'push'
+        run: |
+          gcloud run deploy "$SERVICE" \
+            --source . \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --allow-unauthenticated \
+            --quiet
+
+      - name: Smoke test production
+        if: github.event_name == 'push'
+        run: node scripts/smoke.mjs "https://www.invest-begin.com/mcp"
