@@ -114,6 +114,26 @@ jobs:
             --allow-unauthenticated \
             --quiet
 
+          # A PR preview pins traffic to an explicit revision, which silently
+          # disables "route to latest" for every deploy after it: the new
+          # revision is created and serves nothing while the job still passes.
+          # Routing explicitly is what actually ships the build.
+          gcloud run services update-traffic "$SERVICE" \
+            --project "$PROJECT_ID" --region "$REGION" \
+            --to-latest --quiet
+
+          SERVING=$(gcloud run services describe "$SERVICE" \
+            --project "$PROJECT_ID" --region "$REGION" --format=json \
+            | jq -er '.status.traffic[] | select(.percent == 100) | .revisionName')
+          LATEST=$(gcloud run services describe "$SERVICE" \
+            --project "$PROJECT_ID" --region "$REGION" \
+            --format="value(status.latestReadyRevisionName)")
+          echo "serving=$SERVING latest=$LATEST"
+          if [ "$SERVING" != "$LATEST" ]; then
+            echo "::error::Traffic is on $SERVING but the build produced $LATEST"
+            exit 1
+          fi
+
       - name: Smoke test production
         if: github.event_name == 'push'
         run: node scripts/smoke.mjs "https://www.invest-begin.com/mcp"
