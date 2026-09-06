@@ -71,9 +71,12 @@ jobs:
             --region "$REGION" \
             --no-traffic --tag "$TAG" \
             --quiet
+          # Parse JSON rather than gcloud's --format expressions: those wrap
+          # the value in list/quote punctuation that leaks into the URL.
           URL=$(gcloud run services describe "$SERVICE" \
-            --project "$PROJECT_ID" --region "$REGION" \
-            --format="value(status.traffic.filter(\"tag:$TAG\").extract(\"url\"))" | tr -d '[]')
+            --project "$PROJECT_ID" --region "$REGION" --format=json \
+            | jq -er --arg t "$TAG" '.status.traffic[] | select(.tag == $t) | .url')
+          echo "Preview URL: $URL"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
 
       - name: Smoke test the preview
