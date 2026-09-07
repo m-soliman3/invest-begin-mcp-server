@@ -171,3 +171,6 @@ never under `users/{uid}/`, so this connector has no path to
 
 This reports what configured technical strategies currently signal. It does not
 predict prices and must not be presented as investment advice.
+
+
+[![smithery badge](https://smithery.ai/badge/invest-begin/investBegin-TradeAnalyzer)](https://smithery.ai/servers/invest-begin/investBegin-TradeAnalyzer)
